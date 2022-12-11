@@ -3,10 +3,18 @@
 #include <unistd.h> 
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
+
+// load인지 store인지 판별하는 상수
 #define LOAD 5
 #define STORE 0
-//./ab -s 2 -E 1 -b 4 -t hw04/gcc.trace <--컴파일 방법
-// write-back and LRU 으로만 시작함
+
+#define LRU 1
+#define FIFO 2
+
+// ./cache_simulator -s 2 -E 1 -b 4 -u lru -t hw04/gcc.trace <--컴파일 방법
+// write-back and write-allocate 고정됨
+// cache 교체는 lru와 fifo만 됨
 typedef struct cache_setting{
   int s; // set
   int S; // 2^s
@@ -14,10 +22,11 @@ typedef struct cache_setting{
   int E; // set 속 block 개수
 }Cache;
 
+//하나의 저장값
 typedef struct Line {
   unsigned int valid;
   unsigned int tag;
-  unsigned int lru;
+  unsigned int sequence;
 }Line;
 
 typedef struct result{
@@ -35,16 +44,17 @@ Line **makeCache(int S, int E);
 unsigned int getInfo(mem_addr a, unsigned int *set);
 void checkCache(Line **my_cache, unsigned int set, unsigned int tag,int isLoad);
 void update_lru(Line *set, int line);
-
+void update_fifo(Line *set, int line);
 //전역변수
 Result re;
 Cache cache;
-
+int isLRU;
 
 int main(int argc, char** argv) {
   
   char *set_verify; 
   char *trace_file;
+  char *update;
   char option;
 //--------------------------------------------------------------------------
   //정상적인 입력이 되었는지 확인하는 변수
@@ -52,8 +62,9 @@ int main(int argc, char** argv) {
   int line_check = 0; 
   int block_check = 0; 
   int trace_check = 0;
+  int update_check = 0;
   
-  while ((option = getopt(argc, argv, "s:E:b:t:h::")) != -1){
+  while ((option = getopt(argc, argv, "s:E:b:u:t:h::")) != -1){
     switch(option){
     case 's':
       set_verify = optarg; // initialize var if its NULL	 
@@ -71,7 +82,19 @@ int main(int argc, char** argv) {
       cache.b = atoi(optarg);
       block_check = 1;
       break;
-
+      
+    case 'u':
+      update = optarg;
+      if(strcmp(update, "lru") == 0){
+	isLRU = LRU;
+      }else if(strcmp(update, "fifo") == 0){
+	isLRU = FIFO;
+      }else{
+	exit(0);
+      }
+      update_check = 1;
+      break;
+      
     case 't':
       trace_file = optarg;
       trace_check = 1;
@@ -86,13 +109,13 @@ int main(int argc, char** argv) {
   }
   
   // 정상적으로 명령행 인자가 들어 갔는지 확인
-  if ( set_check == 0 || line_check == 0 || block_check == 0 || trace_check == 0) {
+  if ( set_check == 0 || line_check == 0 || block_check == 0|| update_check == 0  || trace_check == 0) {
     // 비정상적으로 인자가 들어옴
     exit(0);
   }
   
   // 정상적인 값의 인자가 들어왔는지 확인
-  if (set_verify == NULL || cache.E == 0 || cache.b == 0 || trace_file == NULL) {
+  if (set_verify == NULL || cache.E == 0 || cache.b == 0 || update == NULL || trace_file == NULL) {
     // 잘못된값이 들어옴
     exit(0);
   }
@@ -149,7 +172,7 @@ Line **makeCache(int S, int E) {
     cache1[i] = malloc(sizeof(Line)*E);
     for(int j = 0; j < E; j++) {
       cache1[i][j].valid = 0;
-      cache1[i][j].lru = j;
+      cache1[i][j].sequence = j;
     }
   }
   return cache1;
@@ -157,7 +180,7 @@ Line **makeCache(int S, int E) {
 
 
 void checkCache(Line **my_cache, unsigned int set, unsigned int tag, int isLoad )  {
-  printf("%d\n", isLoad);
+  //  printf("%d\n", isLoad);
   //hit
   for(int i = 0; i < cache.E; i++) {
     if(my_cache[set][i].valid != 0 && tag == my_cache[set][i].tag) {
@@ -169,19 +192,28 @@ void checkCache(Line **my_cache, unsigned int set, unsigned int tag, int isLoad 
       }else{
 	re.store_hits = re.store_hits + 1;
       }
-      
-      update_lru(my_cache[set], i);
+       if(isLRU == LRU){
+	update_lru(my_cache[set], i);
+      }else if(isLRU == FIFO){
+	update_fifo(my_cache[set], i);
+      }
+      //update_lru(my_cache[set], i);
+      //update_fifo(my_cache[set], i);
       return;
     }
   }
   //miss
   for(int i = 0; i < cache.E; i++) {
-    if(my_cache[set][i].lru == (cache.E - 1)) {
+    if(my_cache[set][i].sequence == (cache.E - 1)) {
       //tag, valid 값 초기화
       my_cache[set][i].valid = 1;
       my_cache[set][i].tag = tag;
-      
-      update_lru(my_cache[set], i);
+
+      if(isLRU == LRU){
+	update_lru(my_cache[set], i);
+      }else if(isLRU == FIFO){
+	update_fifo(my_cache[set], i);
+      }
 
       re.misses = re.misses + 1;
       //load, store 판별
@@ -205,8 +237,19 @@ unsigned int getInfo(mem_addr a, unsigned int *set) {
 void update_lru(Line *set, int line) {
   for(int i = 0; i < cache.E; i++){
     if(i != line){
-      if(set[i].lru < set[line].lru) set[i].lru = set[i].lru++;
+      if(set[i].sequence < set[line].sequence)
+	set[i].sequence = set[i].sequence++;
     }
   }
-  set[line].lru = 0;
+  set[line].sequence = 0;
+}
+
+void update_fifo(Line *set, int line){
+  for(int i = 0; i < cache.E; i++){
+    if(i != line){
+      //printf("%d", set[i].sequence);
+      set[i].sequence = set[i].sequence--;
+    }
+  }
+  set[line].sequence = cache.E - 1;
 }
